@@ -8,9 +8,19 @@ use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use crossbeam::channel::{bounded, select, Receiver, Sender, TrySendError};
 use log::error;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::convert::TryFrom;
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 use std::thread;
+
+static MAX_MESSAGE_BYTES: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+pub(super) fn set_max_message_bytes(maximum_message_bytes: usize) {
+    MAX_MESSAGE_BYTES.store(maximum_message_bytes, Ordering::Relaxed);
+}
 
 enum DataStreamConnectionChange {
     Connect(
@@ -367,9 +377,34 @@ where
 
 #[inline]
 fn package_to_vector<R: std::io::Read>(stream: &mut R) -> std::io::Result<Vec<u8>> {
+    package_to_vector_with_limit(stream, MAX_MESSAGE_BYTES.load(Ordering::Relaxed))
+}
+
+#[inline]
+fn package_to_vector_with_limit<R: std::io::Read>(
+    stream: &mut R,
+    maximum_message_bytes: usize,
+) -> std::io::Result<Vec<u8>> {
     let length = stream.read_u32::<LittleEndian>()?;
+    let length = usize::try_from(length).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "TCPROS message length does not fit usize",
+        )
+    })?;
+    if length > maximum_message_bytes {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "TCPROS message exceeds the configured byte limit",
+        ));
+    }
     let u32_size = std::mem::size_of::<u32>();
-    let num_bytes = length as usize + u32_size;
+    let num_bytes = length.checked_add(u32_size).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "TCPROS message length overflow",
+        )
+    })?;
 
     // Allocate memory of the proper size for the incoming message. We
     // do not initialize the memory to zero here (as would be safe)
@@ -382,7 +417,7 @@ fn package_to_vector<R: std::io::Read>(stream: &mut R) -> std::io::Result<Vec<u8
     let out_ptr = out.as_mut_ptr();
     // Read length from stream.
     std::io::Cursor::new(unsafe { std::slice::from_raw_parts_mut(out_ptr as *mut u8, u32_size) })
-        .write_u32::<LittleEndian>(length)?;
+        .write_u32::<LittleEndian>(length as u32)?;
 
     // Read data from stream.
     let read_buf = unsafe { std::slice::from_raw_parts_mut(out_ptr as *mut u8, num_bytes) };
@@ -444,5 +479,14 @@ mod tests {
         assert_eq!(data, [7, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7]);
         let data = package_to_vector(&mut cursor).expect(FAILED_TO_READ_WRITE_VECTOR);
         assert_eq!(data, [4, 0, 0, 0, 11, 12, 13, 14]);
+    }
+
+    #[test]
+    fn package_to_vector_rejects_oversized_length_before_allocation() {
+        let input = [5, 0, 0, 0];
+
+        let error = package_to_vector_with_limit(&mut std::io::Cursor::new(input), 4).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 }

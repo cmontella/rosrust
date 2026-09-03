@@ -1,10 +1,79 @@
 use crate::rosmsg::RosMsg;
 use error_chain::bail;
 use std::collections::HashMap;
-use std::io::Error;
+use std::convert::{TryFrom, TryInto};
+use std::io::{Error, ErrorKind};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static MAX_HEADER_BYTES: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+pub(super) fn set_max_header_bytes(maximum_header_bytes: usize) {
+    MAX_HEADER_BYTES.store(maximum_header_bytes, Ordering::Relaxed);
+}
 
 pub fn decode<R: std::io::Read>(data: &mut R) -> Result<HashMap<String, String>, Error> {
-    RosMsg::decode(data)
+    decode_with_limit(data, MAX_HEADER_BYTES.load(Ordering::Relaxed))
+}
+
+fn decode_with_limit<R: std::io::Read>(
+    data: &mut R,
+    maximum_header_bytes: usize,
+) -> Result<HashMap<String, String>, Error> {
+    let raw_length = u32::decode(&mut *data)?;
+    let length = usize::try_from(raw_length).map_err(|_| {
+        Error::new(
+            ErrorKind::InvalidData,
+            "TCPROS header length does not fit usize",
+        )
+    })?;
+    if length > maximum_header_bytes {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "TCPROS header exceeds the configured byte limit",
+        ));
+    }
+
+    let mut bytes = vec![0_u8; length];
+    data.read_exact(&mut bytes)?;
+    let mut offset = 0_usize;
+    let mut output = HashMap::new();
+    while offset < bytes.len() {
+        let length_end = offset.checked_add(4).ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidData,
+                "TCPROS header field length overflow",
+            )
+        })?;
+        let raw_field_length = bytes
+            .get(offset..length_end)
+            .ok_or_else(|| Error::new(ErrorKind::UnexpectedEof, "truncated TCPROS header field"))?;
+        let field_length = u32::from_le_bytes(
+            raw_field_length
+                .try_into()
+                .expect("TCPROS header length prefix is four bytes"),
+        ) as usize;
+        offset = length_end;
+        let field_end = offset.checked_add(field_length).ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidData,
+                "TCPROS header field length overflow",
+            )
+        })?;
+        let field_bytes = bytes
+            .get(offset..field_end)
+            .ok_or_else(|| Error::new(ErrorKind::UnexpectedEof, "truncated TCPROS header field"))?;
+        let field = std::str::from_utf8(field_bytes)
+            .map_err(|error| Error::new(ErrorKind::InvalidData, error))?;
+        let (key, value) = field.split_once('=').ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidData,
+                "TCPROS header fields must be key=value",
+            )
+        })?;
+        output.insert(key.to_owned(), value.to_owned());
+        offset = field_end;
+    }
+    Ok(output)
 }
 
 pub fn encode<W: std::io::Write>(
@@ -132,5 +201,19 @@ mod tests {
         );
         assert_eq!(Some(&String::from("/chatter")), data.get("topic"));
         assert_eq!(Some(&String::from("std_msgs/String")), data.get("type"));
+    }
+
+    #[test]
+    fn rejects_oversized_header_before_allocation() {
+        let input = 65_u32.to_le_bytes();
+        let error = decode_with_limit(&mut std::io::Cursor::new(input), 64).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn rejects_field_larger_than_bounded_header() {
+        let input = [4, 0, 0, 0, 16, 0, 0, 0];
+        let error = decode(&mut std::io::Cursor::new(input)).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::UnexpectedEof);
     }
 }

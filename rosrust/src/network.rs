@@ -1,6 +1,6 @@
 use lazy_static::lazy_static;
 use std::{collections::HashMap, fmt, sync::RwLock};
-use url::Url;
+use url::{Host, Url};
 
 lazy_static! {
     static ref HOST_ALIASES: RwLock<HashMap<String, String>> = RwLock::new(HashMap::new());
@@ -69,20 +69,16 @@ fn parse_host_only(value: &str) -> Result<String, HostAliasError> {
     if value.is_empty() {
         return Err(HostAliasError);
     }
-    let parsed = Url::parse(&format!("http://{}/", value)).map_err(|_| HostAliasError)?;
-    if !parsed.username().is_empty()
-        || parsed.password().is_some()
-        || parsed.port().is_some()
-        || parsed.path() != "/"
-        || parsed.query().is_some()
-        || parsed.fragment().is_some()
-    {
+    let candidate = if value.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{value}]")
+    } else {
+        value.to_owned()
+    };
+    let host = Host::parse(&candidate).map_err(|_| HostAliasError)?;
+    if matches!(&host, Host::Domain(domain) if domain.is_empty()) {
         return Err(HostAliasError);
     }
-    parsed
-        .host_str()
-        .map(str::to_ascii_lowercase)
-        .ok_or(HostAliasError)
+    Ok(host.to_string().to_ascii_lowercase())
 }
 
 #[cfg(test)]
@@ -108,5 +104,14 @@ mod tests {
         assert!(set_host_alias("robot:11311", "10.42.0.1").is_err());
         assert!(set_host_alias("robot", "10.42.0.1/path").is_err());
         assert!(set_host_alias("robot", "user@10.42.0.1").is_err());
+    }
+
+    #[test]
+    fn accepts_ipv6_targets() {
+        set_host_alias("robot-on-v6", "2001:db8::1").unwrap();
+        assert_eq!(
+            rewrite_uri("http://robot-on-v6:44213/"),
+            "http://[2001:db8::1]:44213/"
+        );
     }
 }

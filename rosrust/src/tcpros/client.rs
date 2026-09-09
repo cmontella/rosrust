@@ -76,8 +76,8 @@ fn connect_to_tcp_attempt(
     uri_cache: &UriCache,
     timeout: Option<std::time::Duration>,
 ) -> Result<TcpStream> {
-    let uri = uri_cache.get()?;
-    let trimmed_uri = uri.trim_start_matches("rosrpc://");
+    let uri = crate::network::rewrite_uri(&uri_cache.get()?);
+    let trimmed_uri = uri.trim_start_matches("rosrpc://").trim_end_matches('/');
     let stream = match timeout {
         Some(timeout) => {
             let invalid_addr_error = || {

@@ -23,6 +23,7 @@ yaml-rust = "0.4.5"
 crossbeam = "0.8.1"
 socket2 = "0.4.1"
 colored = "2.0.0"
+url = "1.7.2"
 
 [dependencies.ros_message]
 path = "../ros_message"

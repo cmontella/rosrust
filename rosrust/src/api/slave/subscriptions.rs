@@ -153,16 +153,21 @@ fn request_topic(
     topic: &str,
 ) -> error::rosxmlrpc::Result<(String, String, i32)> {
     use crate::rosxmlrpc::error::ResultExt;
+    let publisher_uri = crate::network::rewrite_uri(publisher_uri);
     let (_code, _message, protocols): (i32, String, (String, String, i32)) = xml_rpc::Client::new()
         .map_err(error::rosxmlrpc::ErrorKind::ForeignXmlRpc)?
         .call(
             &publisher_uri
                 .parse()
-                .chain_err(|| error::rosxmlrpc::ErrorKind::BadUri(publisher_uri.into()))?,
+                .chain_err(|| error::rosxmlrpc::ErrorKind::BadUri(publisher_uri.clone()))?,
             "requestTopic",
             (caller_id, topic, [["TCPROS"]]),
         )
         .chain_err(|| error::rosxmlrpc::ErrorKind::TopicConnectionError(topic.to_owned()))?
         .map_err(|_| "error")?;
-    Ok(protocols)
+    Ok((
+        protocols.0,
+        crate::network::resolve_host(&protocols.1),
+        protocols.2,
+    ))
 }

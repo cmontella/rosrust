@@ -3,6 +3,7 @@
 pub use crate::api::handlers::SubscriptionHandler;
 pub use crate::api::raii::{Publisher, Service, Subscriber};
 pub use crate::api::{error, Clock, Parameter};
+pub use crate::network::{set_host_alias, HostAliasError};
 pub use crate::raw_message::{RawMessage, RawMessageDescription};
 #[doc(hidden)]
 pub use crate::rosmsg::RosMsg;
@@ -22,6 +23,7 @@ mod dynamic_msg;
 mod log_macros;
 #[doc(hidden)]
 pub mod msg;
+mod network;
 mod raw_message;
 #[doc(hidden)]
 pub mod rosmsg;

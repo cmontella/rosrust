@@ -1,5 +1,5 @@
 use lazy_static::lazy_static;
-use std::{collections::HashMap, fmt, sync::RwLock};
+use std::{collections::HashMap, fmt, net::IpAddr, sync::RwLock};
 use url::{Host, Url};
 
 lazy_static! {
@@ -35,7 +35,7 @@ pub fn set_host_alias(alias: &str, target: &str) -> Result<(), HostAliasError> {
 }
 
 pub(crate) fn resolve_host(host: &str) -> String {
-    let key = host.to_ascii_lowercase();
+    let key = parse_host_only(host).unwrap_or_else(|_| host.to_ascii_lowercase());
     HOST_ALIASES
         .read()
         .expect("host alias lock poisoned")
@@ -54,7 +54,14 @@ pub(crate) fn rewrite_uri(uri: &str) -> String {
         Some(host) => resolve_host(host),
         None => return uri.to_owned(),
     };
-    if parsed.host_str() == Some(target.as_str()) || parsed.set_host(Some(&target)).is_err() {
+    if parse_host_only(parsed.host_str().unwrap_or_default()).as_deref() == Ok(target.as_str()) {
+        return uri.to_owned();
+    }
+    let replacement_failed = match target.parse::<IpAddr>() {
+        Ok(address) => parsed.set_ip_host(address).is_err(),
+        Err(_) => parsed.set_host(Some(&target)).is_err(),
+    };
+    if replacement_failed {
         return uri.to_owned();
     }
     let mut rewritten = parsed.to_string();
@@ -78,12 +85,16 @@ fn parse_host_only(value: &str) -> Result<String, HostAliasError> {
     if matches!(&host, Host::Domain(domain) if domain.is_empty()) {
         return Err(HostAliasError);
     }
-    Ok(host.to_string().to_ascii_lowercase())
+    Ok(match host {
+        Host::Domain(domain) => domain.to_ascii_lowercase(),
+        Host::Ipv4(address) => address.to_string(),
+        Host::Ipv6(address) => address.to_string(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{rewrite_uri, set_host_alias};
+    use super::{resolve_host, rewrite_uri, set_host_alias};
 
     #[test]
     fn rewrites_http_and_rosrpc_hosts_without_changing_ports() {
@@ -109,6 +120,7 @@ mod tests {
     #[test]
     fn accepts_ipv6_targets() {
         set_host_alias("robot-on-v6", "2001:db8::1").unwrap();
+        assert_eq!(resolve_host("robot-on-v6"), "2001:db8::1");
         assert_eq!(
             rewrite_uri("http://robot-on-v6:44213/"),
             "http://[2001:db8::1]:44213/"
